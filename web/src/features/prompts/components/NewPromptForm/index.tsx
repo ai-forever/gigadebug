@@ -1,6 +1,5 @@
 import { capitalize } from "lodash";
 import router from "next/router";
-import { usePostHog } from "posthog-js/react";
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/src/components/ui/button";
@@ -24,7 +23,7 @@ import { Textarea } from "@/src/components/ui/textarea";
 import {
   type CreatePromptTRPCType,
   PromptType,
-} from "@/src/features/prompts/server/validation";
+} from "@/src/features/prompts/server/utils/validation";
 import useProjectIdFromURL from "@/src/hooks/useProjectIdFromURL";
 import { api } from "@/src/utils/api";
 import { extractVariables, getIsCharOrUnderscore } from "@/src/utils/string";
@@ -42,6 +41,10 @@ import Link from "next/link";
 import { ArrowTopRightIcon } from "@radix-ui/react-icons";
 import { PromptDescription } from "@/src/features/prompts/components/prompt-description";
 import { JsonEditor } from "@/src/components/json-editor";
+import { PRODUCTION_LABEL } from "@/src/features/prompts/constants";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import usePlaygroundCache from "@/src/ee/features/playground/page/hooks/usePlaygroundCache";
+import { useQueryParam } from "use-query-params";
 
 type NewPromptFormProps = {
   initialPrompt?: Prompt | null;
@@ -51,9 +54,13 @@ type NewPromptFormProps = {
 export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
   const { onFormSuccess, initialPrompt } = props;
   const projectId = useProjectIdFromURL();
+  const [shouldLoadPlaygroundCache] = useQueryParam("loadPlaygroundCache");
   const [formError, setFormError] = useState<string | null>(null);
+  const { playgroundCache } = usePlaygroundCache();
+  const [initialMessages, setInitialMessages] = useState<unknown>([]);
+
   const utils = api.useUtils();
-  const posthog = usePostHog();
+  const capture = usePostHogClientCapture();
 
   let initialPromptContent: PromptContentType | null;
   try {
@@ -107,7 +114,15 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
   ).data?.name;
 
   function onSubmit(values: NewPromptFormSchemaType) {
-    posthog.capture("prompts:new_prompt_form_submit");
+    capture(
+      initialPrompt ? "prompts:update_form_submit" : "prompts:new_form_submit",
+      {
+        type: values.type,
+        active: values.isActive,
+        hasConfig: values.config !== "{}",
+        countVariables: currentExtractedVariables.length,
+      },
+    );
 
     if (!projectId) throw Error("Project ID is not defined.");
 
@@ -122,6 +137,7 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
         type,
         prompt: chatPrompt,
         config: JSON.parse(values.config),
+        labels: values.isActive ? [PRODUCTION_LABEL] : [],
       };
     } else {
       newPrompt = {
@@ -130,6 +146,7 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
         type,
         prompt: textPrompt,
         config: JSON.parse(values.config),
+        labels: values.isActive ? [PRODUCTION_LABEL] : [],
       };
     }
 
@@ -148,12 +165,29 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
   }
 
   useEffect(() => {
+    if (shouldLoadPlaygroundCache && playgroundCache) {
+      form.setValue("type", PromptType.Chat);
+
+      setInitialMessages(playgroundCache.messages);
+    } else if (initialPrompt?.type === PromptType.Chat) {
+      setInitialMessages(initialPrompt.prompt);
+    }
+  }, [playgroundCache, initialPrompt, form, shouldLoadPlaygroundCache]);
+
+  useEffect(() => {
     const isNewPrompt = !allPrompts
       ?.map((prompt) => prompt.value)
       .includes(currentName);
 
     if (!isNewPrompt) {
       form.setError("name", { message: "Prompt name already exist." });
+    } else if (currentName === "new") {
+      form.setError("name", { message: "Prompt name cannot be 'new'" });
+    } else if (currentName && !/^[a-zA-Z0-9_\-.]+$/.test(currentName)) {
+      form.setError("name", {
+        message:
+          "Name must be alphanumeric with optional underscores, hyphens, or periods",
+      });
     } else {
       form.clearErrors("name");
     }
@@ -261,7 +295,10 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
                   name="chatPrompt"
                   render={({ field }) => (
                     <>
-                      <PromptChatMessages {...field} />
+                      <PromptChatMessages
+                        {...field}
+                        initialMessages={initialMessages}
+                      />
                       <FormMessage />
                     </>
                   )}
@@ -308,12 +345,11 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
                 />
               </FormControl>
               <div className="space-y-1 leading-none">
-                <FormLabel>Activate prompt</FormLabel>
+                <FormLabel>Serve prompt as default to SDKs</FormLabel>
               </div>
               {currentIsActive ? (
-                <div className="text-xs text-gray-500">
-                  Activating the prompt will make it available to the SDKs
-                  immediately.
+                <div className="text-xs text-muted-foreground">
+                  This makes the prompt available to the SDKs immediately.
                 </div>
               ) : null}
             </FormItem>

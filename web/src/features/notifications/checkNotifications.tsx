@@ -2,38 +2,48 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import useLocalStorage from "@/src/components/useLocalStorage";
-import Notification, {
+import {
+  Notification,
   type TNotification,
 } from "@/src/features/notifications/Notification";
 import { Button } from "@/src/components/ui/button";
 import { env } from "@/src/env.mjs";
-import phKitty from "./producthuntkitty.png";
-import Image from "next/image";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+
+const ButtonWithPosthog = ({
+  children,
+  className,
+  notificationId,
+  href,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  notificationId: string;
+  href: string;
+}) => {
+  const capture = usePostHogClientCapture();
+  return (
+    <Button
+      size="sm"
+      variant="secondary"
+      className={className}
+      onClick={() => {
+        capture("notification:click_link"),
+          { notificationId: notificationId, href: href };
+      }}
+      asChild
+    >
+      <Link href={href}>{children}</Link>
+    </Button>
+  );
+};
 
 export const NOTIFICATIONS: TNotification[] = [
-  {
-    id: 3,
-    releaseDate: new Date("2024-04-26"),
-    message: "Langfuse 2.0 is live on ProductHunt",
-    description: (
-      <div>
-        <div className="flex items-center gap-3 align-middle">
-          <Image src={phKitty} alt="ProductHunt kitty" width={90} height={90} />
-          <span>
-            At the end of{" "}
-            <Link href="https://langfuse.com/launch" className="underline">
-              Launch Week 1
-            </Link>
-            , we&apos;re back on ProductHunt. Check out the new features and
-            share your feedback in a comment.
-          </span>
-        </div>
-        <Button size="sm" variant="secondary" className="mt-3">
-          <Link href="https://langfuse.com/ph">Vote for Langfuse</Link>
-        </Button>
-      </div>
-    ),
-  },
+  // {
+  //   id: 3,
+  //   releaseDate: new Date("2024-04-26"),
+  //   message: "Langfuse 2.0 is live on ProductHunt",
+  // },
   {
     id: 2,
     releaseDate: new Date("2024-04-24"),
@@ -51,9 +61,13 @@ export const NOTIFICATIONS: TNotification[] = [
           <li>LLM Playground</li>
           <li>More to come every day until Friday</li>
         </ul>
-        <Button size="sm" variant="secondary" className="mt-3">
-          <Link href="https://langfuse.com/launch">Follow along</Link>
-        </Button>
+        <ButtonWithPosthog
+          className="mt-3"
+          notificationId="2"
+          href="https://langfuse.com/launch"
+        >
+          Follow along
+        </ButtonWithPosthog>
       </div>
     ),
   },
@@ -80,11 +94,12 @@ export const NOTIFICATIONS: TNotification[] = [
             the post for details.
           </p>
         )}
-        <Button size="sm" variant="secondary" className="mt-3">
-          <Link href="https://langfuse.com/changelog/2024-01-29-custom-model-prices">
-            Changelog post
-          </Link>
-        </Button>
+        <ButtonWithPosthog
+          notificationId="1"
+          href="https://langfuse.com/changelog/2024-01-29-custom-model-prices"
+        >
+          Changelog post
+        </ButtonWithPosthog>
       </div>
     ),
   },

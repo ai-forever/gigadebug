@@ -13,7 +13,6 @@ import {
 } from "@/src/components/ui/dropdown-menu";
 import { Button } from "@/src/components/ui/button";
 import { ChevronDownIcon, Loader } from "lucide-react";
-import { usePostHog } from "posthog-js/react";
 import {
   NumberParam,
   StringParam,
@@ -22,20 +21,21 @@ import {
   withDefault,
 } from "use-query-params";
 import { useQueryFilterState } from "@/src/features/filters/hooks/useFilterState";
-import {
-  formatIntervalSeconds,
-  intervalInSeconds,
-  utcDateOffsetByDays,
-} from "@/src/utils/dates";
+import { formatIntervalSeconds, utcDateOffsetByDays } from "@/src/utils/dates";
 import useColumnVisibility from "@/src/features/column-visibility/hooks/useColumnVisibility";
 import { type LangfuseColumnDef } from "@/src/components/table/types";
-import { type Prisma, type ObservationLevel } from "@langfuse/shared";
+import {
+  type Prisma,
+  type ObservationLevel,
+  type FilterState,
+  type ObservationOptions,
+} from "@langfuse/shared";
 import { cn } from "@/src/utils/tailwind";
 import { LevelColors } from "@/src/components/level-colors";
 import { usdFormatter } from "@/src/utils/numbers";
 import {
   exportOptions,
-  type ExportFileFormats,
+  type BatchExportFileFormat,
   observationsTableColsWithOptions,
 } from "@langfuse/shared";
 import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
@@ -43,6 +43,8 @@ import type Decimal from "decimal.js";
 import { type ScoreSimplified } from "@/src/server/api/routers/generations/getAllQuery";
 import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
 import { IOTableCell } from "@/src/components/ui/CodeJsonViewer";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { useLookBackDays } from "@/src/hooks/useLookBackDays";
 
 export type GenerationsTableRow = {
   id: string;
@@ -53,6 +55,7 @@ export type GenerationsTableRow = {
   endTime?: string;
   completionStartTime?: Date;
   latency?: number;
+  timeToFirstToken?: number;
   name?: string;
   model?: string;
   // i/o not set explicitly, but fetched from the server from the cell
@@ -76,10 +79,18 @@ export type GenerationsTableRow = {
 
 export type GenerationsTableProps = {
   projectId: string;
+  promptName?: string;
+  promptVersion?: number;
+  omittedFilter?: string[];
 };
 
-export default function GenerationsTable({ projectId }: GenerationsTableProps) {
-  const posthog = usePostHog();
+export default function GenerationsTable({
+  projectId,
+  promptName,
+  promptVersion,
+  omittedFilter = [],
+}: GenerationsTableProps) {
+  const capture = usePostHogClientCapture();
   const [isExporting, setIsExporting] = useState(false);
   const [searchQuery, setSearchQuery] = useQueryParam(
     "search",
@@ -96,13 +107,13 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
     "s",
   );
 
-  const [filterState, setFilterState] = useQueryFilterState(
+  const [inputFilterState, setInputFilterState] = useQueryFilterState(
     [
       {
         column: "Start Time",
         type: "datetime",
         operator: ">",
-        value: utcDateOffsetByDays(-14),
+        value: utcDateOffsetByDays(-useLookBackDays(projectId)),
       },
     ],
     "generations",
@@ -112,6 +123,33 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
     column: "startTime",
     order: "DESC",
   });
+
+  const promptNameFilter: FilterState = promptName
+    ? [
+        {
+          column: "Prompt Name",
+          type: "string",
+          operator: "=",
+          value: promptName,
+        },
+      ]
+    : [];
+
+  const promptVersionFilter: FilterState = promptVersion
+    ? [
+        {
+          column: "Prompt Version",
+          type: "number",
+          operator: "=",
+          value: promptVersion,
+        },
+      ]
+    : [];
+
+  const filterState = inputFilterState.concat([
+    ...promptNameFilter,
+    ...promptVersionFilter,
+  ]);
 
   const generations = api.generations.all.useQuery({
     page: paginationState.pageIndex,
@@ -137,15 +175,19 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
     },
   );
 
-  const handleExport = async (fileFormat: ExportFileFormats) => {
+  const transformFilterOptions = (
+    filterOptions: ObservationOptions | undefined,
+  ) => {
+    return observationsTableColsWithOptions(filterOptions).filter(
+      (col) => !omittedFilter?.includes(col.name),
+    );
+  };
+
+  const handleExport = async (fileFormat: BatchExportFileFormat) => {
     if (isExporting) return;
 
     setIsExporting(true);
-    posthog.capture("generations:export", { file_format: fileFormat });
-    if (fileFormat === "OPENAI-JSONL")
-      alert(
-        "When exporting in OpenAI-JSONL, only generations that exactly match the `ChatML` format will be exported. For any questions, reach out to support.",
-      );
+    capture("generations:export", { file_format: fileFormat });
     try {
       const fileData = await directApi.generations.export.query({
         projectId,
@@ -258,21 +300,12 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
       enableHiding: true,
       enableSorting: true,
       cell: ({ row }) => {
-        const startTime: Date = row.getValue("startTime");
-        const completionStartTime: Date | undefined =
+        const timeToFirstToken: number | undefined =
           row.getValue("timeToFirstToken");
 
-        if (!completionStartTime) {
-          return undefined;
-        }
-
-        const latencyInSeconds =
-          intervalInSeconds(startTime, completionStartTime) || "-";
         return (
           <span>
-            {typeof latencyInSeconds === "number"
-              ? formatIntervalSeconds(latencyInSeconds)
-              : latencyInSeconds}
+            {timeToFirstToken ? formatIntervalSeconds(timeToFirstToken) : "-"}
           </span>
         );
       },
@@ -571,7 +604,7 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
           traceName: generation.traceName ?? "",
           startTime: generation.startTime,
           endTime: generation.endTime?.toLocaleString() ?? undefined,
-          timeToFirstToken: generation.completionStartTime ?? undefined,
+          timeToFirstToken: generation.timeToFirstToken ?? undefined,
           latency: generation.latency ?? undefined,
           totalCost: generation.calculatedTotalCost ?? undefined,
           inputCost: generation.calculatedInputCost ?? undefined,
@@ -596,14 +629,12 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
     : [];
 
   return (
-    <div>
+    <>
       <DataTableToolbar
         columns={columns}
-        filterColumnDefinition={observationsTableColsWithOptions(
-          filterOptions.data,
-        )}
-        filterState={filterState}
-        setFilterState={setFilterState}
+        filterColumnDefinition={transformFilterOptions(filterOptions.data)}
+        filterState={inputFilterState}
+        setFilterState={setInputFilterState}
         searchConfig={{
           placeholder: "Search by id, name, traceName, model",
           updateQuery: setSearchQuery,
@@ -617,9 +648,12 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" className="ml-auto whitespace-nowrap">
-                {filterState.length > 0 || searchQuery
-                  ? "Export selection"
-                  : "Export all"}{" "}
+                <span className="hidden @6xl:inline">
+                  {filterState.length > 0 || searchQuery
+                    ? "Export selection"
+                    : "Export all"}{" "}
+                </span>
+                <span className="@6xl:hidden">Export</span>
                 {isExporting ? (
                   <Loader className="ml-2 h-4 w-4 animate-spin" />
                 ) : (
@@ -632,7 +666,9 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
                 <DropdownMenuItem
                   key={key}
                   className="capitalize"
-                  onClick={() => void handleExport(key as ExportFileFormats)}
+                  onClick={() =>
+                    void handleExport(key as BatchExportFileFormat)
+                  }
                 >
                   as {options.label}
                 </DropdownMenuItem>
@@ -669,7 +705,7 @@ export default function GenerationsTable({ projectId }: GenerationsTableProps) {
         onColumnVisibilityChange={setColumnVisibilityState}
         rowHeight={rowHeight}
       />
-    </div>
+    </>
   );
 }
 
@@ -705,7 +741,7 @@ const GenerationsIOCell = ({
       data={
         io === "output" ? observation.data?.output : observation.data?.input
       }
-      className={cn(io === "output" && "bg-green-50")}
+      className={cn(io === "output" && "bg-accent-light-green")}
       singleLine={singleLine}
     />
   );

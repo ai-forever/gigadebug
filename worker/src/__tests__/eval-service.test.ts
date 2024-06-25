@@ -1,16 +1,23 @@
-import { expect, test, describe, vi } from "vitest";
+import { expect, test, describe, vi, afterAll, beforeAll } from "vitest";
 import {
   createEvalJobs,
   evaluate,
   extractVariablesFromTrace,
-} from "../eval-service";
+} from "../features/evaluation/eval-service";
 import { kyselyPrisma, prisma } from "@langfuse/shared/src/db";
 import { randomUUID } from "crypto";
 import Decimal from "decimal.js";
 import { pruneDatabase } from "./utils";
 import { sql } from "kysely";
-import { LangfuseNotFoundError, variableMappingList } from "@langfuse/shared";
+import {
+  LLMAdapter,
+  LangfuseNotFoundError,
+  variableMappingList,
+} from "@langfuse/shared";
 import { encrypt } from "@langfuse/shared/encryption";
+import { OpenAIServer } from "./network";
+import { afterEach } from "node:test";
+import { evalQueue } from "../queues/evalQueue";
 
 vi.mock("../redis/consumer", () => ({
   evalQueue: {
@@ -26,6 +33,20 @@ vi.mock("../redis/consumer", () => ({
     }),
   },
 }));
+
+let OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const hasActiveKey = Boolean(OPENAI_API_KEY);
+if (!hasActiveKey) {
+  OPENAI_API_KEY = "sk-test_not_used_as_network_mocks_are_activated";
+}
+const openAIServer = new OpenAIServer({
+  hasActiveKey,
+  useDefaultResponse: false,
+});
+
+beforeAll(openAIServer.setup);
+afterEach(openAIServer.reset);
+afterAll(openAIServer.teardown);
 
 describe("create eval jobs", () => {
   test("creates new eval job", async () => {
@@ -129,6 +150,19 @@ describe("create eval jobs", () => {
       })
       .execute();
 
+    await kyselyPrisma.$kysely
+      .insertInto("llm_api_keys")
+      .values({
+        id: randomUUID(),
+        project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+        secret_key: encrypt(String(OPENAI_API_KEY)),
+        provider: "openai",
+        adapter: LLMAdapter.OpenAI,
+        custom_models: [],
+        display_secret_key: "123456",
+      })
+      .execute();
+
     await prisma.jobConfiguration.create({
       data: {
         id: randomUUID(),
@@ -178,6 +212,38 @@ describe("create eval jobs", () => {
       })
       .execute();
 
+    await kyselyPrisma.$kysely
+      .insertInto("llm_api_keys")
+      .values({
+        id: randomUUID(),
+        project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+        secret_key: encrypt(String(OPENAI_API_KEY)),
+        provider: "openai",
+        adapter: LLMAdapter.OpenAI,
+        custom_models: [],
+        display_secret_key: "123456",
+      })
+      .execute();
+
+    const templateId = randomUUID();
+    await kyselyPrisma.$kysely
+      .insertInto("eval_templates")
+      .values({
+        id: templateId,
+        project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+        name: "test-template",
+        version: 1,
+        prompt: "Please evaluate toxicity {{input}} {{output}}",
+        model: "gpt-3.5-turbo",
+        provider: "openai",
+        model_params: {},
+        output_schema: {
+          reasoning: "Please explain your reasoning",
+          score: "Please provide a score between 0 and 1",
+        },
+      })
+      .executeTakeFirst();
+
     await prisma.jobConfiguration.create({
       data: {
         id: randomUUID(),
@@ -196,6 +262,7 @@ describe("create eval jobs", () => {
         targetObject: "traces",
         scoreName: "score",
         variableMapping: JSON.parse("[]"),
+        evalTemplateId: templateId,
       },
     });
 
@@ -226,6 +293,9 @@ describe("create eval jobs", () => {
     expect(jobs.length).toBe(1);
     expect(jobs[0].project_id).toBe("7a88fb47-b4e2-43b8-a06c-a5ce950dc53a");
     expect(jobs[0].job_input_trace_id).toBe(traceId);
+    console.log(jobs[0]);
+    const j = await evalQueue?.getJob(jobs[0].id);
+    console.log(j);
     expect(jobs[0].status.toString()).toBe("CANCELLED");
     expect(jobs[0].start_time).not.toBeNull();
     expect(jobs[0].end_time).not.toBeNull();
@@ -235,6 +305,7 @@ describe("create eval jobs", () => {
 describe("execute evals", () => {
   test("evals a valid event", async () => {
     await pruneDatabase();
+    openAIServer.respondWithDefault();
     const traceId = randomUUID();
 
     await kyselyPrisma.$kysely
@@ -258,6 +329,7 @@ describe("execute evals", () => {
         version: 1,
         prompt: "Please evaluate toxicity {{input}} {{output}}",
         model: "gpt-3.5-turbo",
+        provider: "openai",
         model_params: {},
         output_schema: {
           reasoning: "Please explain your reasoning",
@@ -307,8 +379,10 @@ describe("execute evals", () => {
       .values({
         id: randomUUID(),
         project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
-        secret_key: encrypt(String(process.env.OPENAI_API_KEY)),
+        secret_key: encrypt(String(OPENAI_API_KEY)),
         provider: "openai",
+        adapter: LLMAdapter.OpenAI,
+        custom_models: [],
         display_secret_key: "123456",
       })
       .execute();
@@ -342,6 +416,7 @@ describe("execute evals", () => {
     expect(scores.length).toBe(1);
     expect(scores[0].trace_id).toBe(traceId);
     expect(scores[0].comment).not.toBeNull();
+    expect(scores[0].project_id).toBe("7a88fb47-b4e2-43b8-a06c-a5ce950dc53a");
   }, 10_000);
 
   test("fails to eval without llm api key", async () => {
@@ -369,6 +444,7 @@ describe("execute evals", () => {
         version: 1,
         prompt: "Please evaluate toxicity {{input}} {{output}}",
         model: "gpt-3.5-turbo",
+        provider: "openai",
         model_params: {},
         output_schema: {
           reasoning: "Please explain your reasoning",
@@ -462,6 +538,7 @@ describe("execute evals", () => {
         version: 1,
         prompt: "Please evaluate toxicity {{input}} {{output}}",
         model: "gpt-3.5-turbo",
+        provider: "openai",
         model_params: {},
         output_schema: {
           reasoning: "Please explain your reasoning",
@@ -569,6 +646,7 @@ describe("test variable extraction", () => {
       },
     ]);
   }, 10_000);
+
   test("extracts variables from a observation", async () => {
     await pruneDatabase();
     const traceId = randomUUID();
@@ -626,6 +704,111 @@ describe("test variable extraction", () => {
       },
       {
         value: '{"haha":"This is a great response"}',
+        var: "output",
+      },
+    ]);
+  }, 10_000);
+
+  test("fails if observation is not present", async () => {
+    await pruneDatabase();
+    const traceId = randomUUID();
+
+    await kyselyPrisma.$kysely
+      .insertInto("traces")
+      .values({
+        id: traceId,
+        project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+        user_id: "a",
+        input: { input: "This is a great prompt" },
+        output: { output: "This is a great response" },
+      })
+      .execute();
+
+    const variableMapping = variableMappingList.parse([
+      {
+        langfuseObject: "generation",
+        selectedColumnId: "input",
+        templateVariable: "input",
+        objectName: "great-llm-name",
+      },
+      {
+        langfuseObject: "generation",
+        selectedColumnId: "output",
+        templateVariable: "output",
+        objectName: "great-llm-name",
+      },
+    ]);
+
+    await expect(
+      extractVariablesFromTrace(
+        "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+        ["input", "output"],
+        traceId,
+        variableMapping
+      )
+    ).rejects.toThrowError(
+      new LangfuseNotFoundError(
+        `Observation great-llm-name for trace ${traceId} not found. Please ensure the mapped data exists and consider extending the job delay.`
+      )
+    );
+  }, 10_000);
+
+  test("does not fail if observation data is null", async () => {
+    await pruneDatabase();
+    const traceId = randomUUID();
+
+    await kyselyPrisma.$kysely
+      .insertInto("traces")
+      .values({
+        id: traceId,
+        project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+        user_id: "a",
+        input: { input: "This is a great prompt" },
+        output: { output: "This is a great response" },
+      })
+      .execute();
+
+    // fetching input and output for an observation which has NULL values
+    await kyselyPrisma.$kysely
+      .insertInto("observations")
+      .values({
+        id: randomUUID(),
+        trace_id: traceId,
+        name: "great-llm-name",
+        type: sql`'GENERATION'::"ObservationType"`,
+        project_id: "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+      })
+      .execute();
+
+    const variableMapping = variableMappingList.parse([
+      {
+        langfuseObject: "generation",
+        selectedColumnId: "input",
+        templateVariable: "input",
+        objectName: "great-llm-name",
+      },
+      {
+        langfuseObject: "generation",
+        selectedColumnId: "output",
+        templateVariable: "output",
+        objectName: "great-llm-name",
+      },
+    ]);
+
+    const result = await extractVariablesFromTrace(
+      "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a",
+      ["input", "output"],
+      traceId,
+      variableMapping
+    );
+
+    expect(result).toEqual([
+      {
+        value: "",
+        var: "input",
+      },
+      {
+        value: "",
         var: "output",
       },
     ]);
