@@ -1,8 +1,15 @@
-import { getDisplaySecretKey, hashSecretKey } from "@langfuse/shared";
-import { prisma } from "@langfuse/shared/src/db";
 import { hash } from "bcryptjs";
 
+import { env } from "@/src/env.mjs";
+import { getDisplaySecretKey, hashSecretKey } from "@langfuse/shared";
+import { prisma } from "@langfuse/shared/src/db";
+import { type z, ZodObject } from "zod";
+
 export const pruneDatabase = async () => {
+  if (!env.DATABASE_URL.includes("localhost:5432")) {
+    throw new Error("You cannot prune database unless running on localhost.");
+  }
+
   await prisma.score.deleteMany();
   await prisma.scoreConfig.deleteMany();
   await prisma.observation.deleteMany();
@@ -65,6 +72,22 @@ export async function makeAPICall<T = IngestionAPIResponse>(
   const response = await fetch(finalUrl, options);
   const responseBody = (await response.json()) as T;
   return { body: responseBody, status: response.status };
+}
+
+export async function makeZodVerifiedAPICall<T extends z.ZodTypeAny>(
+  responseZodSchema: T,
+  method: "POST" | "GET" | "PUT" | "DELETE" | "PATCH",
+  url: string,
+  body?: unknown,
+  auth?: string,
+): Promise<{ body: z.infer<T>; status: number }> {
+  const { body: resBody, status } = await makeAPICall(method, url, body, auth);
+  if (responseZodSchema instanceof ZodObject) {
+    responseZodSchema.strict().parse(resBody);
+  } else {
+    responseZodSchema.parse(resBody);
+  }
+  return { body: resBody, status };
 }
 
 export const setupUserAndProject = async () => {

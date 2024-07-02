@@ -32,7 +32,7 @@ import * as Sentry from "@sentry/nextjs";
 import { isPrismaException } from "@/src/utils/exceptions";
 import { env } from "@/src/env.mjs";
 import {
-  ValidationError,
+  InvalidRequestError,
   MethodNotAllowedError,
   BaseError,
   ForbiddenError,
@@ -102,7 +102,7 @@ export default async function handler(
                   ? event.id
                   : "unknown"
                 : "unknown",
-            error: new ValidationError(parsed.error.message),
+            error: new InvalidRequestError(parsed.error.message),
           });
           return undefined;
         } else {
@@ -135,6 +135,10 @@ export default async function handler(
     );
   } catch (error: unknown) {
     console.error("error handling ingestion event", error);
+
+    if (!(error instanceof UnauthorizedError)) {
+      Sentry.captureException(error);
+    }
 
     if (error instanceof BaseError) {
       return res.status(error.httpCode).json({
@@ -248,9 +252,12 @@ async function retry<T>(request: () => Promise<T>): Promise<T> {
     },
   });
 }
-export const getBadRequestError = (errors: Array<unknown>): ValidationError[] =>
+export const getBadRequestError = (
+  errors: Array<unknown>,
+): InvalidRequestError[] =>
   errors.filter(
-    (error): error is ValidationError => error instanceof ValidationError,
+    (error): error is InvalidRequestError =>
+      error instanceof InvalidRequestError,
   );
 
 export const getResourceNotFoundError = (
@@ -262,7 +269,7 @@ export const getResourceNotFoundError = (
   );
 
 export const hasBadRequestError = (errors: Array<unknown>) =>
-  errors.some((error) => error instanceof ValidationError);
+  errors.some((error) => error instanceof InvalidRequestError);
 
 const handleSingleEvent = async (
   event: z.infer<typeof ingestionEvent>,
@@ -283,7 +290,7 @@ const handleSingleEvent = async (
     restEvent = rest;
   }
   console.log(
-    `handling single event ${event.id} ${JSON.stringify({ body: restEvent })}`,
+    `handling single event ${event.id} of type ${event.type}:  ${JSON.stringify({ body: restEvent })}`,
   );
 
   const cleanedEvent = ingestionEvent.parse(cleanEvent(event));
@@ -347,7 +354,7 @@ export const handleBatchResult = (
   }[] = [];
 
   errors.forEach((error) => {
-    if (error.error instanceof ValidationError) {
+    if (error.error instanceof InvalidRequestError) {
       returnedErrors.push({
         id: error.id,
         status: 400,
